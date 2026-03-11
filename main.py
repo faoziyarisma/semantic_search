@@ -1,12 +1,9 @@
 from fastapi import FastAPI
-from langchain.vectorstores import Chroma
-from langchain.embeddings import HuggingFaceEmbeddings
+
+# from services.search_services import search_display
+import services.search_services as search_services
 
 app = FastAPI()
-
-embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-vectorstore = Chroma(persist_directory="database", embedding_function=embedding)
 
 
 @app.get("/")
@@ -16,11 +13,9 @@ def read_root():
 
 @app.get("/search")
 def search(query: str):
-    results = vectorstore.similarity_search(query, k=5)
-    return {"query": query, "results": [r.page_content for r in results]}
+    return search_services.search_display(query)
 
 
 @app.get("/search_summary")
 def search_summary(query: str):
-    results = vectorstore.similarity_search(query, k=5)
-    return {"query": query, "summary": " ".join([r.page_content for r in results])}
+    return search_services.generate_summary(query)
