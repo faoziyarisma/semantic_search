@@ -2,22 +2,46 @@ from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings
 from fastapi import HTTPException
 from transformers import pipeline
+import services.helper_service as helper_service
+from google import genai
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
+# Embedding model
 embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
+# Vector database
 vectorstore = Chroma(persist_directory="database", embedding_function=embedding)
 
+# Summarization model
 summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
+# QA model
 qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+# Gemini client
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+model = client.models
 
 
 def search(query: str, k: int = 5):
     """
     Retrieve top-k documents with relevance scores
+    and clean the text content
     """
-    return vectorstore.similarity_search_with_relevance_scores(query, k=k)
+    results = vectorstore.similarity_search_with_relevance_scores(query, k=k)
+
+    cleaned_results = []
+
+    for doc, score in results:
+        if doc.page_content:
+            doc.page_content = helper_service.clean_text(doc.page_content)
+
+        cleaned_results.append((doc, score))
+
+    return cleaned_results
 
 
 def search_display(query: str, k: int = 5):
@@ -56,10 +80,8 @@ def generate_summary(query: str, k: int = 5):
         if not results:
             return "No relevant information found."
 
-        # gabungkan semua content
         text = " ".join([doc.page_content for doc, _ in results])
 
-        # limit panjang teks agar aman untuk model
         text = text[:3000]
 
         summary = summarizer(text, max_length=150, min_length=50, do_sample=False)
@@ -71,9 +93,6 @@ def generate_summary(query: str, k: int = 5):
 
 
 def search_summary(query: str, k: int = 5):
-    """
-    API-friendly summary response
-    """
     try:
         summary = generate_summary(query, k)
 
@@ -84,19 +103,38 @@ def search_summary(query: str, k: int = 5):
 
 
 def generate_answer(query: str, k: int = 5):
-    results = search(query, k)
+    """
+    Extractive QA using HuggingFace QA model
+    """
+    try:
+        results = search(query, k)
 
-    if not results:
-        return "Informasi tidak ditemukan."
+        if not results:
+            return "Informasi tidak ditemukan."
 
-    # gabungkan context
-    context = " ".join([doc.page_content for doc, _ in results])
+        contexts = [doc.page_content.strip() for doc, _ in results if doc.page_content]
 
-    context = context[:4000]
+        contexts = contexts[:3]
 
-    result = qa_pipeline(question=query, context=context)
+        best_answer = ""
+        best_score = 0
 
-    return result["answer"]
+        for context in contexts:
+            context = context[:2000]
+
+            result = qa_pipeline(question=query, context=context)
+
+            if result["score"] > best_score:
+                best_score = result["score"]
+                best_answer = result["answer"]
+
+        if not best_answer.strip():
+            return contexts[0][:200] + "..."
+
+        return best_answer
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def search_answer(query: str, k: int = 5):
@@ -107,3 +145,55 @@ def search_answer(query: str, k: int = 5):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def gemini_answer(query: str, k: int = 5):
+    """
+    RAG answer using Gemini
+    """
+    try:
+        results = search(query, k)
+
+        if not results:
+            return {"query": query, "answer": "Informasi tidak ditemukan."}
+
+        contexts = [doc.page_content.strip() for doc, _ in results if doc.page_content]
+
+        contexts = contexts[:3]
+
+        answer = generate_rag_summary(query, contexts)
+
+        return {"query": query, "answer": answer}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def generate_rag_summary(query: str, contexts: list):
+    """
+    Generate natural answer using Gemini
+    """
+
+    context_text = "\n".join(contexts)
+
+    prompt = f"""
+Anda adalah asisten yang menjelaskan informasi dengan bahasa sederhana.
+
+Pertanyaan pengguna:
+{query}
+
+Informasi dari dokumen:
+{context_text}
+
+Tugas:
+1. Jelaskan jawaban dari pertanyaan pengguna.
+2. Gunakan bahasa Indonesia yang mudah dipahami.
+3. Buat ringkasan 3-5 kalimat.
+4. Fokus menjawab pertanyaan pengguna.
+
+Jawaban:
+"""
+
+    response = model.generate_content(model="gemini-2.5-flash", contents=prompt)
+
+    return response.text

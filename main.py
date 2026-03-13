@@ -18,4 +18,4 @@ def search(query: str):
 
 @app.get("/search_summary")
 def search_summary(query: str):
-    return search_services.generate_summary(query)
+    return search_services.gemini_answer(query)
